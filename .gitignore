@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded attendance PDFs — contain personal academic data.
+downloads/
+
+# Discovery dumps — may contain your name, roll number, or subject list.
+discovery*.txt
+discovery*.png
+run-*.txt
+run-*.png
+fill-diagnostic.txt
+
+# Generated dashboard — embeds your name and attendance data.
+dashboard.html
+
+# Playwright saved session. Contains live auth cookies; treat as a credential.
+auth_state.json

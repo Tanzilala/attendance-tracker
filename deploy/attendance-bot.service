@@ -1,0 +1,22 @@
+# systemd unit for the attendance Telegram bot (listen mode).
+# Install: see deploy/DEPLOY.md. Edit User= and the paths to match your VPS.
+
+[Unit]
+Description=Attendance Telegram bot (listen mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/attendance-tracker
+# HOME must be set so uv and the Playwright browser cache resolve correctly.
+Environment=HOME=/root
+ExecStart=/opt/attendance-tracker/deploy/run-listen.sh
+Restart=always
+RestartSec=10
+# Give a running attendance check time to finish before a stop/restart kills it.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
