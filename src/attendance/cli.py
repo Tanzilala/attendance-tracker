@@ -428,6 +428,9 @@ def listen() -> None:
                  "TELEGRAM_CHAT_ID in .env (see `attendance telegram-setup`).")
     token, chat_id = creds
 
+    # Drain stale messages FIRST, then announce. If we announced first and
+    # drained after, a /check sent in that gap would be swept up and ignored.
+    offset = next_offset(token)
     try:
         send_message(token, chat_id,
                      "Attendance bot online. Send /check to check your attendance "
@@ -436,7 +439,6 @@ def listen() -> None:
         sys.exit(f"Could not reach Telegram: {exc}")
 
     print("Listening for /check ... (Ctrl+C to stop)")
-    offset = next_offset(token)  # ignore anything sent before we came online
     while True:
         try:
             updates = get_updates(token, offset, timeout_s=25)
