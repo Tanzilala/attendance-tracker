@@ -231,8 +231,8 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
     # The Adobe form streams the PDF a beat after submit; poll for it,
     # but bail early if the portal shows the out-of-window message.
     blocked = False
-    for _ in range(20):  # ~15s
-        page.wait_for_timeout(750)
+    for _ in range(30):  # ~15s
+        page.wait_for_timeout(500)
         if downloads:
             break
         if window_blocked(page):
@@ -400,8 +400,11 @@ def _run_remote_check(token: str, chat_id: str) -> None:
         _solve_captcha_by_phone(page, username, password, token, chat_id)
 
     def notify_error(msg: str) -> None:
+        # Messages are self-contained (the CAPTCHA-timeout text already reads as
+        # a full sentence); prefix generic failures with a warning sign.
+        text = msg if msg.startswith(("⏱️", "⚠️")) else f"⚠️ Couldn't check attendance: {msg}"
         try:
-            send_message(token, chat_id, f"Attendance check failed: {msg}")
+            send_message(token, chat_id, text)
         except TelegramError:
             pass
 
@@ -480,14 +483,15 @@ def listen() -> None:
 
 
 def _solve_captcha_by_phone(page, username, password, token, chat_id,
-                            attempts: int = 3, reply_timeout_s: int = 240) -> None:
+                            attempts: int = 3, reply_timeout_s: int = 120) -> None:
     """Relay the CAPTCHA to Telegram and apply the reply, retrying on rejection."""
+    mins = reply_timeout_s // 60
     for attempt in range(1, attempts + 1):
         open_login(page, username, password)
         image = captcha_image(page)
 
         offset = next_offset(token)  # ignore anything sent before this prompt
-        caption = ("Reply with the CAPTCHA text (case-sensitive)."
+        caption = (f"Reply with the CAPTCHA text (case-sensitive). {mins} min to reply."
                    if attempt == 1 else
                    f"That didn't work. New CAPTCHA - reply again (try {attempt}/{attempts}).")
         send_photo(token, chat_id, image, caption=caption)
@@ -495,7 +499,11 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
 
         answer, offset = wait_for_text(token, chat_id, offset, reply_timeout_s)
         if answer is None:
-            raise LoginTimeout("No CAPTCHA reply came back in time.")
+            # notify_error relays this to Telegram, so make it self-contained.
+            raise LoginTimeout(
+                f"⏱️ CAPTCHA timed out - no reply in {mins} min. "
+                "Send /check when you're ready to try again."
+            )
 
         submit_captcha(page, answer.strip())
         if login_succeeded(page):

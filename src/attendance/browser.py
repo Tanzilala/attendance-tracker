@@ -256,8 +256,14 @@ def wait_for_form(page: Page, timeout_ms: int = 60_000):
     """
     deadline = time.monotonic() + timeout_ms / 1000
 
+    i = 0
     while time.monotonic() < deadline:
-        dismiss_popups(page)  # safety net: a stray popup would block rendering
+        # The popup is already cleared before we get here; only re-check for a
+        # stray one occasionally, since dismiss_popups scans every frame and that
+        # overhead per poll noticeably slowed the form-wait.
+        if i % 6 == 0:
+            dismiss_popups(page)
+        i += 1
         # Search EVERY frame for the form, not just the one whose URL matches —
         # frame-URL matching proved unreliable, and the form is defined by its
         # controls (SUBMIT + 3 dropdowns) wherever it lives.
@@ -268,7 +274,7 @@ def wait_for_form(page: Page, timeout_ms: int = 60_000):
                     return frame
             except Exception:
                 continue  # frame detached/cross-origin mid-poll; skip it
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
 
     _dump_form_diag(page)
     raise FormNotReady(
@@ -332,9 +338,9 @@ def clear_login_popup(page: Page, timeout_ms: int = 20_000) -> bool:
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         if dismiss_popups(page):
-            page.wait_for_timeout(600)  # let the modal tear down
+            page.wait_for_timeout(300)  # let the modal tear down
             return True
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)
     return False
 
 
@@ -367,11 +373,10 @@ def goto_attendance(page: Page, timeout_ms: int = 40_000) -> None:
             continue
 
         # Give the app frame a chance to load before deciding to retry.
-        for _ in range(8):
+        for _ in range(12):
             if attendance_frame(page) is not None:
                 return
-            dismiss_popups(page)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(300)
 
     # Fell through without the app frame — wait_for_form() will raise a clear
     # FormNotReady with a snapshot.
@@ -423,7 +428,7 @@ def select_filter(frame, index: int, option_text: str, timeout_ms: int = 20_000)
             if item.is_visible():
                 item.scroll_into_view_if_needed()
                 item.click()
-                frame.wait_for_timeout(900)  # let WebDynpro post back
+                frame.wait_for_timeout(500)  # let WebDynpro post back
                 if not item.is_visible():     # listbox closed => selection took
                     return
                 continue
@@ -437,7 +442,7 @@ def select_filter(frame, index: int, option_text: str, timeout_ms: int = 20_000)
                 last_open = now
         except Exception as exc:
             last_err = exc
-        frame.wait_for_timeout(350)
+        frame.wait_for_timeout(250)
 
     _dump_fill_diag(frame, index, option_text, last_err)
     raise FillError(
