@@ -103,7 +103,7 @@ def submit_captcha(page: Page, answer: str) -> None:
     page.click(LOGON_BUTTON)
 
 
-def login_succeeded(page: Page, timeout_ms: int = 20_000) -> bool:
+def login_succeeded(page: Page, timeout_ms: int = 12_000) -> bool:
     """True if we reached the portal desktop, False if the login was rejected."""
     try:
         page.wait_for_selector(f"text={NAV_ATTENDANCE_TAB}", timeout=timeout_ms)

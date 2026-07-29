@@ -486,6 +486,7 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
                             attempts: int = 3, reply_timeout_s: int = 120) -> None:
     """Relay the CAPTCHA to Telegram and apply the reply, retrying on rejection."""
     mins = reply_timeout_s // 60
+    t0 = time.monotonic()
     for attempt in range(1, attempts + 1):
         open_login(page, username, password)
         image = captcha_image(page)
@@ -493,9 +494,10 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
         offset = next_offset(token)  # ignore anything sent before this prompt
         caption = (f"Reply with the CAPTCHA text (case-sensitive). {mins} min to reply."
                    if attempt == 1 else
-                   f"That didn't work. New CAPTCHA - reply again (try {attempt}/{attempts}).")
+                   f"❌ That CAPTCHA didn't match. Here's a new one - reply again "
+                   f"(try {attempt}/{attempts}, case-sensitive).")
         send_photo(token, chat_id, image, caption=caption)
-        print(f"  CAPTCHA sent to Telegram (attempt {attempt}/{attempts}). Waiting for reply...")
+        print(f"  [{time.monotonic()-t0:5.1f}s] CAPTCHA sent (attempt {attempt}/{attempts}); waiting for reply", flush=True)
 
         answer, offset = wait_for_text(token, chat_id, offset, reply_timeout_s)
         if answer is None:
@@ -505,12 +507,17 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
                 "Send /check when you're ready to try again."
             )
 
+        print(f"  [{time.monotonic()-t0:5.1f}s] got reply; submitting", flush=True)
         submit_captcha(page, answer.strip())
         if login_succeeded(page):
-            print("  Logged in.\n")
+            print(f"  [{time.monotonic()-t0:5.1f}s] logged in", flush=True)
             return
+        print(f"  [{time.monotonic()-t0:5.1f}s] CAPTCHA rejected, retrying", flush=True)
 
-    raise LoginTimeout(f"CAPTCHA rejected {attempts} times; giving up.")
+    raise LoginTimeout(
+        "❌ CAPTCHA didn't match after 3 tries. Send /check to start over "
+        "(watch case, and 0 vs O)."
+    )
 
 
 def _last_pdf() -> Path:

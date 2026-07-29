@@ -13,5 +13,9 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 # uv is usually installed to one of these; adjust if `which uv` differs.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH"
 
+# Unbuffered stdout so print()/timing lines reach journalctl immediately.
+# Without this, systemd buffers the bot's output and the logs look empty.
+export PYTHONUNBUFFERED=1
+
 exec xvfb-run -a --server-args="-screen 0 1280x1024x24" \
     uv run python -m attendance listen
