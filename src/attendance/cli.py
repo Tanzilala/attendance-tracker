@@ -202,23 +202,30 @@ def discover() -> None:
 
 
 def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> None:
-    """Everything from the portal desktop to delivery. Shared by run and remote."""
-    print("  Navigating to the attendance form...")
+    """Everything from the portal desktop to delivery. Shared by run and remote.
+
+    No per-step debug snapshots on the happy path: each was a full-page
+    screenshot plus a whole-DOM scan (seconds apiece) that also widened the gap
+    between steps and let the iView time out. Snapshots now happen only on
+    failure (in _run_session's handler) or when no PDF comes back.
+    """
+    t0 = time.monotonic()
+
+    def lap(label: str) -> None:
+        print(f"  [{time.monotonic() - t0:5.1f}s] {label}", flush=True)
+
+    lap("navigating to form")
     goto_attendance(page)
     frame = wait_for_form(page)  # the exact frame the form was found in
-    print("  Form ready. Filling filters automatically...")
-    capture("form")
+    lap("form ready; filling filters")
 
     select_filter(frame, 0, FILTER_ACADEMIC_YEAR)
     select_filter(frame, 1, FILTER_SEMESTER)
     select_filter(frame, 2, FILTER_REPORT_TYPE)
-    print(f"  Dropdowns set. Dates {SEMESTER_START} -> {end_date}...")
-    capture("filters")
+    lap("dropdowns set; filling dates")
 
     fill_dates(frame, SEMESTER_START, end_date)
-    capture("dates")
-
-    print("  Submitting...")
+    lap("submitting")
     click_submit(frame)
 
     # The Adobe form streams the PDF a beat after submit; poll for it,
@@ -231,10 +238,10 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
         if window_blocked(page):
             blocked = True
             break
-    capture("result")
+    lap("result stage done")
 
     if downloads:
-        print(f"\n  Done. PDF captured: {downloads[-1].name}")
+        print(f"  Done. PDF captured: {downloads[-1].name}", flush=True)
         _deliver(downloads[-1], when=end_date, send=send)
     elif blocked:
         raise WindowClosed(
@@ -242,8 +249,8 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
             "refused the report right now. Try again inside that window."
         )
     else:
-        print("\n  Submitted, but no PDF was captured. The result snapshot")
-        print("  will show what came back instead.")
+        capture("noresult")  # keep evidence when the PDF didn't come back
+        print("  Submitted, but no PDF was captured.", flush=True)
 
 
 def _run_session(login_fn, *, headless: bool, pause_at_end: bool,
