@@ -31,8 +31,11 @@ def _open(req: urllib.request.Request, timeout: int) -> dict:
         except Exception:
             detail = str(exc.code)
         raise TelegramError(f"Telegram API error: {detail}") from None
-    except urllib.error.URLError as exc:
-        raise TelegramError(f"Could not reach Telegram: {exc.reason}") from None
+    except Exception as exc:
+        # URLError, socket resets, connection drops mid-read, JSON glitches —
+        # wrap them ALL as TelegramError so no raw exception ever escapes and
+        # crashes the long-running listener.
+        raise TelegramError(f"Could not reach Telegram: {exc}") from None
 
     if not body.get("ok"):
         raise TelegramError(f"Telegram rejected the request: {body.get('description')}")

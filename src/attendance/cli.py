@@ -438,22 +438,24 @@ def listen() -> None:
                  "TELEGRAM_CHAT_ID in .env (see `attendance telegram-setup`).")
     token, chat_id = creds
 
-    # Drain stale messages FIRST, then announce. If we announced first and
-    # drained after, a /check sent in that gap would be swept up and ignored.
-    offset = next_offset(token)
+    # No "online" announcement: it fired on every (re)start and spammed the chat.
+    # The bot runs silently; send /check to confirm it's alive.
+    print("Listening for /check ... (Ctrl+C to stop)", flush=True)
     try:
-        send_message(token, chat_id,
-                     "Attendance bot online. Send /check to check your attendance "
-                     "(portal only works 6 PM - 7 AM).")
-    except TelegramError as exc:
-        sys.exit(f"Could not reach Telegram: {exc}")
+        offset = next_offset(token)  # drain messages sent before we came up
+    except Exception as exc:  # a startup blip must not kill the service
+        print(f"  startup drain failed ({exc}); continuing", flush=True)
+        offset = 0
 
-    print("Listening for /check ... (Ctrl+C to stop)")
     while True:
         try:
             updates = get_updates(token, offset, timeout_s=25)
-        except TelegramError as exc:
-            print(f"  poll error: {exc}; retrying in 5s")
+        except Exception as exc:
+            # ANY error here (dropped long-poll, socket reset, JSON glitch) must
+            # only pause-and-retry, never crash the process. An earlier version
+            # caught just TelegramError, so a raw connection error crashed the
+            # loop, systemd restarted it, and that spammed the chat on each boot.
+            print(f"  poll error ({type(exc).__name__}: {exc}); retrying in 5s", flush=True)
             time.sleep(5)
             continue
 
