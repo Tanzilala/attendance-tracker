@@ -209,15 +209,22 @@ class WindowClosed(RuntimeError):
 
 
 def window_blocked(page: Page) -> bool:
-    """True if the attendance app is showing the out-of-window message."""
+    """True if the attendance app is showing the out-of-window message.
+
+    Uses a fast text-locator count, NOT inner_text() of the whole body: the
+    latter took up to 3s each call, and being polled every 500ms it dragged the
+    post-submit wait out to ~100s. A ``text=`` locator just counts matches.
+    """
     frame = attendance_frame(page)
     if frame is None:
         return False
-    try:
-        text = frame.locator("body").inner_text(timeout=3000)
-    except Exception:
-        return False
-    return any(marker in text for marker in WINDOW_MARKERS)
+    for marker in WINDOW_MARKERS:
+        try:
+            if frame.locator(f"text={marker}").count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 class SessionExpired(RuntimeError):
@@ -537,15 +544,22 @@ def attach_recorders(context: BrowserContext, download_dir: Path) -> list[Path]:
             looks_pdf = "application/pdf" in ctype or response.url.lower().split("?")[0].endswith(".pdf")
             if not looks_pdf:
                 return
-            body = response.body()
+            try:
+                body = response.body()
+            except Exception as inner:
+                # body() can be unavailable (streamed to the viewer, evicted from
+                # cache) — re-fetch the same URL through the context, reusing the
+                # session cookies. This is what failed silently on the VPS.
+                print(f"\n    [pdf body() failed: {inner}; re-fetching]", flush=True)
+                body = context.request.get(response.url).body()
             if not body.startswith(b"%PDF"):
                 return  # content-type lied; not really a PDF
             target = download_dir / f"attendance-{len(saved) + 1}.pdf"
             target.write_bytes(body)
             saved.append(target)
-            print(f"\n    [pdf] {len(body):,} bytes -> {target.name}")
+            print(f"\n    [pdf] {len(body):,} bytes -> {target.name}", flush=True)
         except Exception as exc:  # a missed PDF is worth a note, not a crash
-            print(f"\n    [pdf capture failed: {type(exc).__name__}]")
+            print(f"\n    [pdf capture failed: {type(exc).__name__}: {exc}]", flush=True)
 
     def wire(target_page) -> None:
         target_page.on("download", on_download)

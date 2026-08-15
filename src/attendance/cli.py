@@ -491,7 +491,9 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
     t0 = time.monotonic()
     for attempt in range(1, attempts + 1):
         open_login(page, username, password)
+        print(f"  [{time.monotonic()-t0:5.1f}s] login page loaded", flush=True)
         image = captcha_image(page)
+        print(f"  [{time.monotonic()-t0:5.1f}s] captcha screenshotted", flush=True)
 
         offset = next_offset(token)  # ignore anything sent before this prompt
         caption = (f"Reply with the CAPTCHA text (case-sensitive). {mins} min to reply."
