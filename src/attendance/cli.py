@@ -496,6 +496,7 @@ def _solve_captcha_by_phone(page, username, password, token, chat_id,
         print(f"  [{time.monotonic()-t0:5.1f}s] captcha screenshotted", flush=True)
 
         offset = next_offset(token)  # ignore anything sent before this prompt
+        print(f"  [{time.monotonic()-t0:5.1f}s] telegram drained; uploading photo", flush=True)
         caption = (f"Reply with the CAPTCHA text (case-sensitive). {mins} min to reply."
                    if attempt == 1 else
                    f"❌ That CAPTCHA didn't match. Here's a new one - reply again "

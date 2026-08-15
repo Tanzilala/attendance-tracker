@@ -540,18 +540,24 @@ def attach_recorders(context: BrowserContext, download_dir: Path) -> list[Path]:
         # fires a download event. Catch it by content-type instead, which works
         # regardless of how the page embeds it.
         try:
+            url = response.url
+            # Skip Chromium's built-in PDF viewer response (chrome-extension://)
+            # and data: URLs — those aren't the server's PDF and can't be
+            # re-fetched. We want the real http(s) response from the portal.
+            if not url.startswith(("http://", "https://")):
+                return
             ctype = (response.headers or {}).get("content-type", "")
-            looks_pdf = "application/pdf" in ctype or response.url.lower().split("?")[0].endswith(".pdf")
+            looks_pdf = "application/pdf" in ctype or url.lower().split("?")[0].endswith(".pdf")
             if not looks_pdf:
                 return
             try:
                 body = response.body()
-            except Exception as inner:
-                # body() can be unavailable (streamed to the viewer, evicted from
-                # cache) — re-fetch the same URL through the context, reusing the
-                # session cookies. This is what failed silently on the VPS.
-                print(f"\n    [pdf body() failed: {inner}; re-fetching]", flush=True)
-                body = context.request.get(response.url).body()
+            except Exception:
+                # The viewer already consumed the response, so its body is gone.
+                # Re-fetch the same http URL through the context (reuses session
+                # cookies) — now that it's a real URL, this works.
+                print(f"\n    [pdf body gone; re-fetching {url[:70]}]", flush=True)
+                body = context.request.get(url).body()
             if not body.startswith(b"%PDF"):
                 return  # content-type lied; not really a PDF
             target = download_dir / f"attendance-{len(saved) + 1}.pdf"
@@ -559,7 +565,8 @@ def attach_recorders(context: BrowserContext, download_dir: Path) -> list[Path]:
             saved.append(target)
             print(f"\n    [pdf] {len(body):,} bytes -> {target.name}", flush=True)
         except Exception as exc:  # a missed PDF is worth a note, not a crash
-            print(f"\n    [pdf capture failed: {type(exc).__name__}: {exc}]", flush=True)
+            print(f"\n    [pdf capture failed for {response.url[:70]}: "
+                  f"{type(exc).__name__}: {exc}]", flush=True)
 
     def wire(target_page) -> None:
         target_page.on("download", on_download)
