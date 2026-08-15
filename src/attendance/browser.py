@@ -10,6 +10,7 @@ never logged, echoed, or written to disk. Keep it that way when editing.
 
 from __future__ import annotations
 
+import base64
 import re
 import time
 from dataclasses import dataclass
@@ -511,6 +512,65 @@ def fill_dates(frame, start: str, end: str) -> None:
 
 def click_submit(frame) -> None:
     frame.locator(f"div[ct=B]:has-text('{SUBMIT_LABEL}')").first.click()
+
+
+def start_pdf_interception(page, download_dir: Path, saved: list[Path]):
+    """Capture the attendance PDF at the network layer, via CDP.
+
+    Chromium renders the PDF in its built-in viewer, which consumes the response
+    body — so response.body() fails and only a useless chrome-extension:// URL is
+    ever surfaced as an event. CDP's Fetch domain pauses the response *before* the
+    viewer takes it, letting us read the bytes and then continue the request so
+    the page still renders. Returns the CDP client (pass to stop_pdf_interception)
+    or None if it couldn't be set up (the response-event path stays as fallback).
+    """
+    try:
+        client = page.context.new_cdp_session(page)
+        client.send("Fetch.enable", {"patterns": [{"requestStage": "Response"}]})
+    except Exception as exc:
+        print(f"\n    [cdp setup failed: {exc}]", flush=True)
+        return None
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    def on_paused(event: dict) -> None:
+        request_id = event.get("requestId")
+        try:
+            headers = {h.get("name", "").lower(): h.get("value", "")
+                       for h in (event.get("responseHeaders") or [])}
+            if not saved and "application/pdf" in headers.get("content-type", ""):
+                res = client.send("Fetch.getResponseBody", {"requestId": request_id})
+                raw = res.get("body", "")
+                body = base64.b64decode(raw) if res.get("base64Encoded") else raw.encode("latin-1", "ignore")
+                if body[:4] == b"%PDF":
+                    target = download_dir / f"attendance-{len(saved) + 1}.pdf"
+                    target.write_bytes(body)
+                    saved.append(target)
+                    print(f"\n    [pdf via cdp] {len(body):,} bytes -> {target.name}", flush=True)
+        except Exception as exc:
+            print(f"\n    [cdp pdf err: {exc}]", flush=True)
+        finally:
+            try:
+                client.send("Fetch.continueRequest", {"requestId": request_id})
+            except Exception:
+                pass  # request may already be gone; nothing to do
+
+    client.on("Fetch.requestPaused", on_paused)
+    return client
+
+
+def stop_pdf_interception(client) -> None:
+    """Turn off CDP Fetch interception so normal browsing resumes."""
+    if client is None:
+        return
+    try:
+        client.send("Fetch.disable")
+    except Exception:
+        pass
+    try:
+        client.detach()
+    except Exception:
+        pass
 
 
 def attach_recorders(context: BrowserContext, download_dir: Path) -> list[Path]:

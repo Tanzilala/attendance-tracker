@@ -8,11 +8,31 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
 
 API = "https://api.telegram.org/bot{token}/{method}"
+
+# Force IPv4 for Telegram only. On some VPSes (this one has IPv6) the IPv6 route
+# to api.telegram.org blackholes, so every call stalls ~20-30s before falling
+# back. Restricting DNS results to IPv4 for telegram.org avoids that entirely;
+# all other hostnames are untouched. Python's urllib is the only thing here that
+# uses sockets (Playwright does its own networking), so this is safe.
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, *args, **kwargs):
+    results = _orig_getaddrinfo(host, *args, **kwargs)
+    if isinstance(host, str) and "telegram.org" in host:
+        ipv4 = [r for r in results if r[0] == socket.AF_INET]
+        if ipv4:
+            return ipv4
+    return results
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 
 class TelegramError(RuntimeError):

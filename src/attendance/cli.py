@@ -37,6 +37,8 @@ from attendance.browser import (
     open_login,
     save_inspection,
     select_filter,
+    start_pdf_interception,
+    stop_pdf_interception,
     submit_captcha,
     wait_for_form,
     window_blocked,
@@ -226,18 +228,23 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
 
     fill_dates(frame, SEMESTER_START, end_date)
     lap("submitting")
-    click_submit(frame)
 
-    # The Adobe form streams the PDF a beat after submit; poll for it,
-    # but bail early if the portal shows the out-of-window message.
-    blocked = False
-    for _ in range(30):  # ~15s
-        page.wait_for_timeout(500)
-        if downloads:
-            break
-        if window_blocked(page):
-            blocked = True
-            break
+    # Intercept the PDF at the network layer before Chromium's viewer eats it.
+    cdp = start_pdf_interception(page, Path("downloads"), downloads)
+    try:
+        click_submit(frame)
+        # The Adobe form streams the PDF a beat after submit; poll for it,
+        # but bail early if the portal shows the out-of-window message.
+        blocked = False
+        for _ in range(30):  # ~15s
+            page.wait_for_timeout(500)
+            if downloads:
+                break
+            if window_blocked(page):
+                blocked = True
+                break
+    finally:
+        stop_pdf_interception(cdp)
     lap("result stage done")
 
     if downloads:
