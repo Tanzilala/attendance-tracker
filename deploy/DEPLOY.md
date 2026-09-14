@@ -103,6 +103,22 @@ follows.
 
 ---
 
+## Letting friends use it (multi-user)
+
+The bot is multi-user: anyone who messages it can `/register` (SAP login +
+semester/year/start-date, password stored **encrypted**) and then `/check` to get
+their own attendance. Each check uses that person's own credentials.
+
+- **Set an invite code.** In `.env`, set `ATTENDANCE_INVITE_CODE` to something and
+  share it only with friends — otherwise any stranger who finds the bot can
+  register and use your server. Restart the service after changing `.env`.
+- **You are the custodian of your friends' SAP passwords.** They live (encrypted)
+  in `users.json` on your VPS, with the key in `.secret_key`. Both are gitignored.
+  If the box is breached, those accounts are exposed and that's on you. Only offer
+  this to people who consent, and consider whether your college allows it.
+- **One check at a time.** Checks run serially; if two people `/check` at the exact
+  same moment, the second may need to resend. Fine at friends scale.
+
 ## Operating notes
 
 - **Updating the code:** copy the new files up, then

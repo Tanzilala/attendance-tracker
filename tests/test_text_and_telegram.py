@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from attendance.analysis import analyse, SubjectAttendance
-from attendance.cli import _in_window, _command_from_update
+from attendance.cli import _in_window, _parse_message, _validate_step
 from attendance.report import format_text
 from attendance import telegram
 
@@ -12,24 +12,42 @@ def _update(chat_id, text, uid=1):
     return {"update_id": uid, "message": {"chat": {"id": chat_id}, "text": text}}
 
 
-class TestListenCommandGate:
-    def test_recognizes_check_from_the_owner(self):
-        assert _command_from_update(_update(42, "/check"), "42") == "check"
+class TestParseMessage:
+    def test_returns_chat_id_as_string_and_trimmed_text(self):
+        assert _parse_message(_update(42, "  /check ")) == ("42", "/check")
 
-    def test_strips_slash_and_lowercases(self):
-        assert _command_from_update(_update(42, "  /Check "), "42") == "check"
+    def test_non_message_update_is_ignored(self):
+        assert _parse_message({"update_id": 1}) == (None, "")
 
-    def test_ignores_other_chats(self):
-        # Security: someone else who finds the bot must not be able to trigger it.
-        assert _command_from_update(_update(999, "/check"), "42") is None
+    def test_message_without_text_yields_empty(self):
+        assert _parse_message({"update_id": 1, "message": {"chat": {"id": 42}}}) == ("42", "")
 
-    def test_chat_id_type_mismatch_still_matches(self):
-        # Telegram sends numeric ids; our config is a string.
-        assert _command_from_update(_update(42, "/check"), "42") == "check"
 
-    def test_empty_or_nontext_message_is_none(self):
-        assert _command_from_update({"update_id": 1, "message": {"chat": {"id": 42}}}, "42") is None
-        assert _command_from_update(_update(42, ""), "42") is None
+class TestRegistrationValidation:
+    def test_semester_number_becomes_label(self):
+        assert _validate_step("semester", "5") == "Semester V"
+
+    def test_bad_semester_raises_user_message(self):
+        with pytest.raises(ValueError, match="1-8"):
+            _validate_step("semester", "banana")
+
+    def test_year_becomes_academic_year_label(self):
+        assert _validate_step("year", "2026") == "Acad .Year 2026-2027"
+
+    def test_bad_year_raises(self):
+        with pytest.raises(ValueError):
+            _validate_step("year", "26")
+
+    def test_valid_date_passes_through(self):
+        assert _validate_step("start_date", "12.06.2026") == "12.06.2026"
+
+    def test_bad_date_raises(self):
+        with pytest.raises(ValueError, match="DD.MM.YYYY"):
+            _validate_step("start_date", "2026-06-12")
+
+    def test_classes_skip_defaults_to_six(self):
+        assert _validate_step("classes", "skip") == 6
+        assert _validate_step("classes", "8") == 8
 
 
 class TestViewingWindow:

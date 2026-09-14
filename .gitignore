@@ -18,3 +18,9 @@ dashboard.html
 
 # Playwright saved session. Contains live auth cookies; treat as a credential.
 auth_state.json
+
+# Multi-user store: friends' SAP logins (encrypted) + the encryption key.
+# These are the most sensitive files in the project — never commit them.
+users.json
+.secret_key
+form-diagnostic.txt

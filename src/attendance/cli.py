@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 from datetime import date, datetime
+
+from attendance import users
 
 from attendance.browser import (
     DATE_FMT,
@@ -86,12 +89,18 @@ def _telegram_creds() -> tuple[str, str] | None:
     return (token, chat) if token and chat else None
 
 
-def _deliver(pdf_path: Path, *, when: str = "", send: bool = True) -> None:
-    """Parse a captured PDF, show the short text, and send it to Telegram."""
+def _deliver(pdf_path: Path, ctx: CheckCtx, *, when: str = "") -> None:
+    """Parse a captured PDF, show the short text, and send it to the ctx's chat."""
     try:
         subjects = parse_pdf(pdf_path)
     except ParseError as exc:
         print(f"\n  Could not read the attendance PDF: {exc}")
+        if ctx.send and ctx.token and ctx.chat_id:
+            try:
+                send_message(ctx.token, ctx.chat_id,
+                             f"⚠️ Got the report but couldn't read it: {exc}")
+            except TelegramError:
+                pass
         return
 
     report = analyse(subjects)
@@ -100,16 +109,10 @@ def _deliver(pdf_path: Path, *, when: str = "", send: bool = True) -> None:
     for line in text.splitlines():
         print(f"    {line}")
 
-    if not send:
-        return
-
-    creds = _telegram_creds()
-    if not creds:
-        print("\n  (Telegram not configured — set TELEGRAM_BOT_TOKEN and "
-              "TELEGRAM_CHAT_ID in .env to auto-send. See `attendance telegram-setup`.)")
+    if not (ctx.send and ctx.token and ctx.chat_id):
         return
     try:
-        send_message(*creds, text)
+        send_message(ctx.token, ctx.chat_id, text)
         print("\n  Sent to Telegram.")
     except TelegramError as exc:
         print(f"\n  Telegram send failed: {exc}")
@@ -136,6 +139,48 @@ def _credentials() -> tuple[str, str]:
     if not username or not password:
         sys.exit("SAP_USERNAME and SAP_PASSWORD must be set in .env (see .env.example).")
     return username, password
+
+
+@dataclass
+class CheckCtx:
+    """Everything one attendance check needs — whose login, which filters, and
+    which Telegram chat to relay the CAPTCHA to and send the result to.
+
+    This is what makes the tool multi-user: each friend's /check builds a ctx
+    from their stored config, so the same pipeline serves everyone.
+    """
+    token: str
+    chat_id: str
+    username: str
+    password: str
+    academic_year: str
+    semester: str
+    start_date: str
+    classes_per_day: int
+    send: bool = True
+
+
+def _owner_ctx(*, send: bool) -> CheckCtx:
+    """Context for the owner's own commands (run / remote / test-fill), built
+    from .env credentials and the current default filters."""
+    username, password = _credentials()
+    creds = _telegram_creds()
+    token, chat_id = creds if creds else ("", "")
+    return CheckCtx(
+        token=token, chat_id=chat_id, username=username, password=password,
+        academic_year=FILTER_ACADEMIC_YEAR, semester=FILTER_SEMESTER,
+        start_date=SEMESTER_START, classes_per_day=_classes_per_day(), send=send,
+    )
+
+
+def _user_ctx(token: str, user: users.User) -> CheckCtx:
+    """Context for a registered friend, from their stored config."""
+    return CheckCtx(
+        token=token, chat_id=str(user.chat_id), username=user.sap_username,
+        password=user.password(), academic_year=user.academic_year,
+        semester=user.semester, start_date=user.start_date,
+        classes_per_day=user.classes_per_day, send=True,
+    )
 
 
 def discover() -> None:
@@ -203,14 +248,15 @@ def discover() -> None:
             print("  No downloads captured.")
 
 
-def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> None:
-    """Everything from the portal desktop to delivery. Shared by run and remote.
+def _pipeline_after_login(page, downloads, ctx: CheckCtx, capture) -> None:
+    """Everything from the portal desktop to delivery, using ctx's filters.
 
     No per-step debug snapshots on the happy path: each was a full-page
     screenshot plus a whole-DOM scan (seconds apiece) that also widened the gap
     between steps and let the iView time out. Snapshots now happen only on
-    failure (in _run_session's handler) or when no PDF comes back.
+    failure (in _run_check's handler) or when no PDF comes back.
     """
+    end_date = date.today().strftime(DATE_FMT)
     t0 = time.monotonic()
 
     def lap(label: str) -> None:
@@ -221,12 +267,12 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
     frame = wait_for_form(page)  # the exact frame the form was found in
     lap("form ready; filling filters")
 
-    select_filter(frame, 0, FILTER_ACADEMIC_YEAR)
-    select_filter(frame, 1, FILTER_SEMESTER)
+    select_filter(frame, 0, ctx.academic_year)
+    select_filter(frame, 1, ctx.semester)
     select_filter(frame, 2, FILTER_REPORT_TYPE)
     lap("dropdowns set; filling dates")
 
-    fill_dates(frame, SEMESTER_START, end_date)
+    fill_dates(frame, ctx.start_date, end_date)
     lap("submitting")
 
     # Intercept the PDF at the network layer before Chromium's viewer eats it.
@@ -249,7 +295,7 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
 
     if downloads:
         print(f"  Done. PDF captured: {downloads[-1].name}", flush=True)
-        _deliver(downloads[-1], when=end_date, send=send)
+        _deliver(downloads[-1], ctx, when=end_date)
     elif blocked:
         raise WindowClosed(
             "The portal only serves attendance between 6 PM and 7 AM, and "
@@ -260,12 +306,13 @@ def _pipeline_after_login(page, downloads, end_date, capture, *, send: bool) -> 
         print("  Submitted, but no PDF was captured.", flush=True)
 
 
-def _run_session(login_fn, *, headless: bool, pause_at_end: bool,
-                 on_error=None) -> None:
-    """Drive one browser session: login (via login_fn) then the shared pipeline."""
-    username, password = _credentials()
-    end_date = date.today().strftime(DATE_FMT)
+def _run_check(ctx: CheckCtx, login_fn, *, headless: bool, pause_at_end: bool = False,
+               on_error=None, save_session: bool = False) -> None:
+    """Drive one browser session: login (via login_fn) then the shared pipeline.
 
+    login_fn(page) closes over whatever it needs (ctx credentials, or the
+    interactive local login).
+    """
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
         context = browser.new_context(accept_downloads=True)
@@ -283,14 +330,16 @@ def _run_session(login_fn, *, headless: bool, pause_at_end: bool,
             print(f"    snapshot: {stem}")
 
         try:
-            login_fn(page, username, password)
-            # Save the authenticated session so `test-fill` can iterate on the
-            # form without re-solving a CAPTCHA (works while the session lives).
-            try:
-                context.storage_state(path="auth_state.json")
-            except Exception:
-                pass
-            _pipeline_after_login(page, downloads, end_date, capture, send=True)
+            login_fn(page)
+            # Save the authenticated session so `test-fill` can iterate without a
+            # fresh CAPTCHA. Only for the owner's own runs — never persist a
+            # friend's session cookies to disk.
+            if save_session:
+                try:
+                    context.storage_state(path="auth_state.json")
+                except Exception:
+                    pass
+            _pipeline_after_login(page, downloads, ctx, capture)
         except (LoginTimeout, SessionExpired, FormNotReady, FillError, WindowClosed) as exc:
             capture("failed")
             print(f"\n  Stopped: {exc}")
@@ -317,7 +366,7 @@ def test_fill() -> None:
     if not Path("auth_state.json").exists():
         sys.exit("No saved session. Run `attendance remote` once to log in first.")
 
-    end_date = date.today().strftime(DATE_FMT)
+    ctx = _owner_ctx(send=False)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=False)
         context = browser.new_context(accept_downloads=True, storage_state="auth_state.json")
@@ -340,7 +389,7 @@ def test_fill() -> None:
                 page.wait_for_selector(f"text={NAV_ATTENDANCE_TAB}", timeout=15_000)
             except PlaywrightTimeout:
                 sys.exit("Saved session expired. Run `attendance remote` to log in again.")
-            _pipeline_after_login(page, downloads, end_date, capture, send=False)
+            _pipeline_after_login(page, downloads, ctx, capture)
         except (SessionExpired, FormNotReady, FillError, WindowClosed) as exc:
             capture("failed")
             print(f"\n  Stopped: {exc}")
@@ -366,7 +415,9 @@ def run() -> None:
     if not _confirm_window():
         print("  Stopped.")
         return
-    _run_session(login, headless=False, pause_at_end=True)
+    ctx = _owner_ctx(send=True)
+    _run_check(ctx, lambda page: login(page, ctx.username, ctx.password),
+               headless=False, pause_at_end=True, save_session=True)
 
 
 def remote() -> None:
@@ -375,22 +426,21 @@ def remote() -> None:
     Lets the check run without you at the machine. You still solve every CAPTCHA
     yourself — it is relayed to Telegram, never solved automatically.
     """
-    creds = _telegram_creds()
-    if not creds:
+    if not _telegram_creds():
         sys.exit("Telegram not configured. Set TELEGRAM_BOT_TOKEN and "
                  "TELEGRAM_CHAT_ID in .env (see `attendance telegram-setup`).")
-    _run_remote_check(*creds)
+    _run_remote_check(_owner_ctx(send=True), save_session=True)
 
 
-def _run_remote_check(token: str, chat_id: str) -> None:
-    """Run one phone-relay check: CAPTCHA to Telegram, then the full pipeline.
+def _run_remote_check(ctx: CheckCtx, *, save_session: bool = False) -> None:
+    """Run one phone-relay check for ctx: CAPTCHA to their chat, then the pipeline.
 
-    Shared by `remote` (one-shot) and `listen` (on /check). Never exits the
-    process — reports outcomes over Telegram so the listener keeps running.
+    Shared by `remote` (owner, one-shot) and `listen` (any registered friend).
+    Never exits the process — reports outcomes over Telegram so listen keeps going.
     """
     if not _in_window():
         try:
-            send_message(token, chat_id,
+            send_message(ctx.token, ctx.chat_id,
                          "Skipped - outside the 6 PM to 7 AM window. Try again tonight.")
         except TelegramError:
             pass
@@ -398,106 +448,261 @@ def _run_remote_check(token: str, chat_id: str) -> None:
         return
 
     # Headed by default: this portal's IE-emulation codepath fails to render the
-    # WebDynpro app in headless Chromium (the app frame never loads). You don't
-    # interact with the window — the CAPTCHA is solved via Telegram — it just has
-    # to be compositing. On a no-display server, run under xvfb (see deploy/).
+    # WebDynpro app in headless Chromium (the app frame never loads). On a
+    # no-display server, run under xvfb (see deploy/).
     headless = (os.environ.get("HEADLESS") or "").strip() in ("1", "true", "yes")
-
-    def telegram_login(page, username, password) -> None:
-        _solve_captcha_by_phone(page, username, password, token, chat_id)
 
     def notify_error(msg: str) -> None:
         # Messages are self-contained (the CAPTCHA-timeout text already reads as
         # a full sentence); prefix generic failures with a warning sign.
         text = msg if msg.startswith(("⏱️", "⚠️")) else f"⚠️ Couldn't check attendance: {msg}"
         try:
-            send_message(token, chat_id, text)
+            send_message(ctx.token, ctx.chat_id, text)
         except TelegramError:
             pass
 
-    _run_session(telegram_login, headless=headless, pause_at_end=False,
-                 on_error=notify_error)
+    _run_check(ctx, lambda page: _solve_captcha_by_phone(page, ctx),
+               headless=headless, on_error=notify_error, save_session=save_session)
 
 
-def _command_from_update(update: dict, chat_id: str) -> str | None:
-    """Extract a normalized command from an update, or None.
-
-    Returns None for messages from any chat other than the configured one — the
-    security gate that stops anyone else who finds the bot from triggering it.
-    """
+def _parse_message(update: dict) -> tuple[str | None, str]:
+    """Return (chat_id, text) for a message update, or (None, "") otherwise."""
     msg = update.get("message") or {}
     chat = msg.get("chat") or {}
-    if str(chat.get("id")) != str(chat_id):
-        return None
-    text = (msg.get("text") or "").strip().lower().lstrip("/")
-    return text or None
+    cid = chat.get("id")
+    if cid is None:
+        return None, ""
+    return str(cid), (msg.get("text") or "").strip()
+
+
+_HELP = (
+    "📋 Attendance bot\n"
+    "/check - check your attendance (works 6 PM - 7 AM)\n"
+    "/register - set up or update your details\n"
+    "/help - this message"
+)
+
+
+def _begin_registration(token: str, chat_id: str, reg: dict) -> None:
+    """Start (or restart) registration for a chat."""
+    need_invite = bool((os.environ.get("ATTENDANCE_INVITE_CODE") or "").strip())
+    first = "invite" if need_invite else "username"
+    reg[chat_id] = {"step": first, "data": {}}
+    prompts = {
+        "invite": "Let's set you up. First, the invite code your friend gave you:",
+        "username": "Your SAP username (roll number):",
+    }
+    send_message(token, chat_id, prompts[first])
+
+
+# (prompt, validator/transform) per step. Validator raises ValueError with a
+# user-facing message on bad input; otherwise returns the value to store.
+def _validate_step(step: str, text: str) -> object:
+    if step == "invite":
+        want = (os.environ.get("ATTENDANCE_INVITE_CODE") or "").strip()
+        if text != want:
+            raise ValueError("That invite code isn't right. Try again:")
+        return text
+    if step == "username":
+        if not text:
+            raise ValueError("Please send your SAP username (roll number):")
+        return text
+    if step == "password":
+        if not text:
+            raise ValueError("Please send your SAP password:")
+        return text
+    if step == "semester":
+        try:
+            n = int(text)
+            return users.semester_label(n)  # validates 1-8
+        except ValueError:
+            raise ValueError("Reply with your semester as a number 1-8 (e.g. 5):")
+    if step == "year":
+        try:
+            y = int(text)
+            if not (2000 <= y <= 2100):
+                raise ValueError
+            return users.academic_year_label(y)
+        except ValueError:
+            raise ValueError("Reply the academic year's START year, e.g. 2026:")
+    if step == "start_date":
+        try:
+            datetime.strptime(text, DATE_FMT)  # DD.MM.YYYY
+            return text
+        except ValueError:
+            raise ValueError("Reply the semester start date as DD.MM.YYYY (e.g. 12.06.2026):")
+    if step == "classes":
+        if text.lower() in ("skip", "-", ""):
+            return 6
+        try:
+            return max(1, int(text))
+        except ValueError:
+            raise ValueError("Reply a number (classes per day), or 'skip' for 6:")
+    raise ValueError("Unknown step")
+
+
+_NEXT_STEP = {
+    "invite": "username", "username": "password", "password": "semester",
+    "semester": "year", "year": "start_date", "start_date": "classes",
+}
+_STEP_PROMPT = {
+    "password": "Your SAP password (stored encrypted; needed to log in for you):",
+    "semester": "Which semester are you in? Reply a number 1-8:",
+    "year": "Academic year START year (e.g. 2026 for 2026-2027):",
+    "start_date": "Semester start date as DD.MM.YYYY (e.g. 12.06.2026):",
+    "classes": "Roughly how many classes per day? Reply a number, or 'skip' for 6:",
+}
+
+
+def _advance_registration(token: str, chat_id: str, text: str, reg: dict) -> None:
+    """Feed one message into an in-progress registration."""
+    state = reg[chat_id]
+    step = state["step"]
+    try:
+        value = _validate_step(step, text)
+    except ValueError as exc:
+        send_message(token, chat_id, str(exc))  # re-prompt, stay on step
+        return
+
+    state["data"][step] = value
+    nxt = _NEXT_STEP.get(step)
+    if nxt is None:  # was the last step ("classes")
+        _finish_registration(token, chat_id, reg)
+        return
+    state["step"] = nxt
+    send_message(token, chat_id, _STEP_PROMPT[nxt])
+
+
+def _finish_registration(token: str, chat_id: str, reg: dict) -> None:
+    data = reg.pop(chat_id)["data"]
+    user = users.User(
+        chat_id=chat_id,
+        sap_username=data["username"],
+        academic_year=data["year"],
+        semester=data["semester"],
+        start_date=data["start_date"],
+        classes_per_day=int(data.get("classes", 6)),
+        sap_password_enc=users.encrypt_password(data["password"]),
+    )
+    users.put_user(user)
+    send_message(
+        token, chat_id,
+        "✅ You're registered!\n"
+        f"Roll no: {user.sap_username}\n"
+        f"{user.semester}, {user.academic_year}\n"
+        f"From: {user.start_date}\n\n"
+        "Send /check any evening (6 PM - 7 AM) to get your attendance.",
+    )
+
+
+def _handle_message(token: str, chat_id: str, text: str, reg: dict) -> bool:
+    """Route one message. Returns True if an attendance check ran (so the caller
+    resyncs the update offset past any CAPTCHA replies it consumed)."""
+    if chat_id in reg:
+        _advance_registration(token, chat_id, text, reg)
+        return False
+
+    command = (text.lower().lstrip("/").split() or [""])[0]
+    if command in ("register", "start", "settings", "reregister", "setup"):
+        _begin_registration(token, chat_id, reg)
+        return False
+    if command in ("check", "attendance"):
+        user = users.get_user(chat_id)
+        if user is None:
+            send_message(token, chat_id,
+                         "You're not set up yet. Send /register to get started.")
+            return False
+        send_message(token, chat_id, "On it - checking your attendance...")
+        _run_remote_check(_user_ctx(token, user))
+        return True
+    send_message(token, chat_id, _HELP)
+    return False
+
+
+def _seed_owner_if_absent(token: str) -> None:
+    """Register the owner from .env once, so the owner is just another user and
+    the pre-multiuser setup keeps working with no manual re-registration."""
+    creds = _telegram_creds()
+    if not creds:
+        return
+    _, owner_chat = creds
+    if not owner_chat or users.get_user(owner_chat):
+        return
+    username = (os.environ.get("SAP_USERNAME") or "").strip()
+    password = (os.environ.get("SAP_PASSWORD") or "").strip()
+    if not (username and password):
+        return
+    try:
+        users.put_user(users.User(
+            chat_id=owner_chat, sap_username=username,
+            academic_year=FILTER_ACADEMIC_YEAR, semester=FILTER_SEMESTER,
+            start_date=SEMESTER_START, classes_per_day=_classes_per_day(),
+            sap_password_enc=users.encrypt_password(password),
+        ))
+        print(f"  seeded owner {owner_chat} from .env", flush=True)
+    except Exception as exc:
+        print(f"  owner seed failed ({exc}); continuing", flush=True)
 
 
 def listen() -> None:
-    """Run continuously; on a /check message from you, run one attendance check.
+    """Run continuously; anyone registered can /check. New friends /register.
 
-    This is the always-on mode meant for the VPS: message the bot instead of
-    running a command. Only messages from TELEGRAM_CHAT_ID are honoured.
+    Always-on mode for the VPS. Multi-user: each message is routed by the sender's
+    chat, and each check uses that person's stored credentials and filters.
     """
-    creds = _telegram_creds()
-    if not creds:
-        sys.exit("Telegram not configured. Set TELEGRAM_BOT_TOKEN and "
-                 "TELEGRAM_CHAT_ID in .env (see `attendance telegram-setup`).")
-    token, chat_id = creds
+    load_dotenv()
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        sys.exit("Set TELEGRAM_BOT_TOKEN in .env (see `attendance telegram-setup`).")
 
-    # No "online" announcement: it fired on every (re)start and spammed the chat.
-    # The bot runs silently; send /check to confirm it's alive.
-    print("Listening for /check ... (Ctrl+C to stop)", flush=True)
+    _seed_owner_if_absent(token)
+
+    print("Listening ... (Ctrl+C to stop)", flush=True)
     try:
         offset = next_offset(token)  # drain messages sent before we came up
     except Exception as exc:  # a startup blip must not kill the service
         print(f"  startup drain failed ({exc}); continuing", flush=True)
         offset = 0
 
+    reg: dict[str, dict] = {}  # chat_id -> in-progress registration
     while True:
         try:
             updates = get_updates(token, offset, timeout_s=25)
         except Exception as exc:
-            # ANY error here (dropped long-poll, socket reset, JSON glitch) must
-            # only pause-and-retry, never crash the process. An earlier version
-            # caught just TelegramError, so a raw connection error crashed the
-            # loop, systemd restarted it, and that spammed the chat on each boot.
+            # ANY error (dropped long-poll, socket reset, JSON glitch) only
+            # pause-and-retries, never crashes the process.
             print(f"  poll error ({type(exc).__name__}: {exc}); retrying in 5s", flush=True)
             time.sleep(5)
             continue
 
         for update in updates:
-            offset = update["update_id"] + 1
-            command = _command_from_update(update, chat_id)
-            if command in ("check", "attendance"):
+            offset = update.get("update_id", offset - 1) + 1
+            sender, text = _parse_message(update)
+            if sender is None or not text:
+                continue
+            try:
+                ran_check = _handle_message(token, sender, text, reg)
+            except Exception as exc:  # one bad message must not kill the bot
+                print(f"  handler error for {sender}: {exc}", flush=True)
+                ran_check = True  # be safe and resync
+            if ran_check:
+                # A check consumed CAPTCHA replies; resync so we don't reprocess
+                # them. (Cost: a message another user sent *during* a check is
+                # skipped and they'd resend — fine at friends scale.)
                 try:
-                    send_message(token, chat_id, "On it - checking your attendance...")
-                    _run_remote_check(token, chat_id)
-                except Exception as exc:  # keep the listener alive no matter what
-                    print(f"  check error: {exc}")
-                    try:
-                        send_message(token, chat_id, f"Check crashed: {exc}")
-                    except TelegramError:
-                        pass
-                # Skip anything sent during the check (e.g. the CAPTCHA reply) so
-                # a queued message can't re-trigger or be misread as a command.
-                offset = next_offset(token)
-            elif command in ("start", "help"):
-                try:
-                    send_message(token, chat_id,
-                                 "Send /check to check your attendance. It works only "
-                                 "during the portal's 6 PM - 7 AM window.")
-                except TelegramError:
+                    offset = next_offset(token)
+                except Exception:
                     pass
 
 
-def _solve_captcha_by_phone(page, username, password, token, chat_id,
+def _solve_captcha_by_phone(page, ctx: CheckCtx,
                             attempts: int = 3, reply_timeout_s: int = 120) -> None:
-    """Relay the CAPTCHA to Telegram and apply the reply, retrying on rejection."""
+    """Relay the CAPTCHA to the ctx's chat and apply the reply, retrying on reject."""
+    token, chat_id = ctx.token, ctx.chat_id
     mins = reply_timeout_s // 60
     t0 = time.monotonic()
     for attempt in range(1, attempts + 1):
-        open_login(page, username, password)
+        open_login(page, ctx.username, ctx.password)
         print(f"  [{time.monotonic()-t0:5.1f}s] login page loaded", flush=True)
         image = captcha_image(page)
         print(f"  [{time.monotonic()-t0:5.1f}s] captcha screenshotted", flush=True)
