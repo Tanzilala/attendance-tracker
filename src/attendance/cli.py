@@ -546,6 +546,9 @@ _NEXT_STEP = {
     "semester": "year", "year": "start_date", "start_date": "classes",
 }
 _STEP_PROMPT = {
+    # "username" is here too: with an invite code, invite -> username is a
+    # mid-flow transition, so this prompt is needed (not just the opening one).
+    "username": "Your SAP username (roll number):",
     "password": "Your SAP password (stored encrypted; needed to log in for you):",
     "semester": "Which semester are you in? Reply a number 1-8:",
     "year": "Academic year START year (e.g. 2026 for 2026-2027):",
@@ -745,8 +748,8 @@ def _last_pdf() -> Path:
 
 
 def send_only() -> None:
-    """Show and send the short text from the last PDF. No login."""
-    _deliver(_last_pdf(), when=date.today().strftime(DATE_FMT), send=True)
+    """Show and send the short text from the last PDF (owner's chat). No login."""
+    _deliver(_last_pdf(), _owner_ctx(send=True), when=date.today().strftime(DATE_FMT))
 
 
 def report_only() -> None:
