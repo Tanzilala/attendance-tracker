@@ -490,15 +490,31 @@ def _dump_fill_diag(frame, index: int, option_text: str, err) -> None:
         pass
 
 
-def fill_dates(frame, start: str, end: str) -> None:
-    """Type the start/end dates. These inputs exist only after Detail Report."""
-    date_inputs = frame.locator("input[ct=IN], input[ct=DP], input[ct=I]")
-    # Filter to the visible, editable date boxes — the frame has hidden inputs too.
-    editable = [
-        date_inputs.nth(i)
-        for i in range(date_inputs.count())
-        if date_inputs.nth(i).is_visible() and date_inputs.nth(i).is_editable()
-    ]
+def fill_dates(frame, start: str, end: str, timeout_ms: int = 15_000) -> None:
+    """Type the start/end dates.
+
+    These inputs exist only after 'Detail Report' is selected AND WebDynpro
+    finishes the postback that selection triggers. That postback can lag a beat
+    behind the dropdown's listbox closing (which is when select_filter returns),
+    so a single immediate check races the render and can find 0 fields — seen on
+    a friend's portal where the postback was slower than on the owner's. POLL
+    until the two editable date boxes appear rather than checking once.
+    """
+    def editable_date_boxes():
+        date_inputs = frame.locator("input[ct=IN], input[ct=DP], input[ct=I]")
+        # Filter to the visible, editable date boxes — the frame has hidden inputs too.
+        return [
+            date_inputs.nth(i)
+            for i in range(date_inputs.count())
+            if date_inputs.nth(i).is_visible() and date_inputs.nth(i).is_editable()
+        ]
+
+    deadline = time.monotonic() + timeout_ms / 1000
+    editable = editable_date_boxes()
+    while len(editable) < 2 and time.monotonic() < deadline:
+        frame.wait_for_timeout(300)  # let the postback render the date fields
+        editable = editable_date_boxes()
+
     if len(editable) < 2:
         raise FillError(
             f"Expected two date fields after selecting Detail Report, found "
