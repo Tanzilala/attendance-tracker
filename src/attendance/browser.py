@@ -402,7 +402,7 @@ def attendance_frame(page: Page):
 # position among ct=CB inputs rather than id, because the WDxx ids regenerate
 # every session. Option text must match the portal exactly.
 FILTER_ACADEMIC_YEAR = "Acad .Year 2026-2027"
-FILTER_SEMESTER = "Semester V"
+FILTER_SEMESTER = "Semester VI"
 FILTER_REPORT_TYPE = "Detail Report"
 
 DATE_FMT = "%d.%m.%Y"  # portal shows 12.06.2026

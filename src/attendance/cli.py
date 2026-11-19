@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -64,7 +64,7 @@ from attendance.telegram import (
     wait_for_text,
 )
 
-SEMESTER_START = "12.06.2026"  # classes began 12 June 2026
+SEMESTER_START = "16.11.2026"  # Semester VI classes began 16 November 2026
 
 
 def _in_window(now: datetime | None = None) -> bool:
@@ -624,12 +624,28 @@ def _handle_message(token: str, chat_id: str, text: str, reg: dict) -> bool:
 
 def _seed_owner_if_absent(token: str) -> None:
     """Register the owner from .env once, so the owner is just another user and
-    the pre-multiuser setup keeps working with no manual re-registration."""
+    the pre-multiuser setup keeps working with no manual re-registration.
+
+    The owner's semester/year/start-date are defined by the constants in code, so
+    on every start an existing owner record is brought in line with them — a new
+    semester then needs only a code update + restart, not a re-registration.
+    """
     creds = _telegram_creds()
     if not creds:
         return
     _, owner_chat = creds
-    if not owner_chat or users.get_user(owner_chat):
+    if not owner_chat:
+        return
+    existing = users.get_user(owner_chat)
+    if existing:
+        wanted = replace(
+            existing, academic_year=FILTER_ACADEMIC_YEAR,
+            semester=FILTER_SEMESTER, start_date=SEMESTER_START,
+        )
+        if wanted != existing:
+            users.put_user(wanted)
+            print(f"  owner updated to {FILTER_SEMESTER}, from {SEMESTER_START}",
+                  flush=True)
         return
     username = (os.environ.get("SAP_USERNAME") or "").strip()
     password = (os.environ.get("SAP_PASSWORD") or "").strip()
