@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -95,7 +97,9 @@ def _deliver(pdf_path: Path, ctx: CheckCtx, *, when: str = "") -> None:
         subjects = parse_pdf(pdf_path)
     except ParseError as exc:
         print(f"\n  Could not read the attendance PDF: {exc}")
-        if ctx.send and ctx.token and ctx.chat_id:
+        if ctx.sink:
+            ctx.sink("error", f"Got the report but couldn't read it: {exc}")
+        elif ctx.send and ctx.token and ctx.chat_id:
             try:
                 send_message(ctx.token, ctx.chat_id,
                              f"⚠️ Got the report but couldn't read it: {exc}")
@@ -109,6 +113,9 @@ def _deliver(pdf_path: Path, ctx: CheckCtx, *, when: str = "") -> None:
     for line in text.splitlines():
         print(f"    {line}")
 
+    if ctx.sink:  # web front end: hand the text to the job instead of Telegram
+        ctx.sink("result", text)
+        return
     if not (ctx.send and ctx.token and ctx.chat_id):
         return
     try:
@@ -158,6 +165,9 @@ class CheckCtx:
     start_date: str
     classes_per_day: int
     send: bool = True
+    # When set (web front end), results/errors go here as sink(kind, text) with
+    # kind "result" | "error", instead of to Telegram.
+    sink: Callable[[str, str], None] | None = None
 
 
 def _owner_ctx(*, send: bool) -> CheckCtx:
@@ -306,8 +316,22 @@ def _pipeline_after_login(page, downloads, ctx: CheckCtx, capture) -> None:
         print("  Submitted, but no PDF was captured.", flush=True)
 
 
-def _run_check(ctx: CheckCtx, login_fn, *, headless: bool, pause_at_end: bool = False,
-               on_error=None, save_session: bool = False) -> None:
+# One browser session at a time across every front end (Telegram loop and web
+# workers share this process): serial checks keep memory bounded on a small VPS.
+_CHECK_LOCK = threading.Lock()
+
+
+def _run_check(ctx: CheckCtx, login_fn, *, on_start=None, **kwargs) -> None:
+    """Serialise checks, then drive one. on_start() fires once the lock is won
+    (the web UI uses it to flip a job from 'queued' to 'starting')."""
+    with _CHECK_LOCK:
+        if on_start:
+            on_start()
+        _run_check_locked(ctx, login_fn, **kwargs)
+
+
+def _run_check_locked(ctx: CheckCtx, login_fn, *, headless: bool, pause_at_end: bool = False,
+                      on_error=None, save_session: bool = False) -> None:
     """Drive one browser session: login (via login_fn) then the shared pipeline.
 
     login_fn(page) closes over whatever it needs (ctx credentials, or the
@@ -663,6 +687,28 @@ def _seed_owner_if_absent(token: str) -> None:
         print(f"  owner seed failed ({exc}); continuing", flush=True)
 
 
+def _start_web_if_configured() -> None:
+    """Serve the website alongside the bot when WEB_PORT is set in .env.
+
+    Off by default: the site takes SAP passwords, so it must only ever be exposed
+    behind HTTPS (see deploy/WEB.md). A failure here must not take the bot down.
+    """
+    if not (os.environ.get("WEB_PORT") or "").strip():
+        return
+    try:
+        from attendance import web
+        web.serve_in_background()
+    except Exception as exc:
+        print(f"  web front end failed to start ({exc}); bot continues", flush=True)
+
+
+def web_only() -> None:
+    """Run just the website in the foreground (local testing; no Telegram needed)."""
+    load_dotenv()
+    from attendance import web
+    web.serve_forever()
+
+
 def listen() -> None:
     """Run continuously; anyone registered can /check. New friends /register.
 
@@ -675,6 +721,7 @@ def listen() -> None:
         sys.exit("Set TELEGRAM_BOT_TOKEN in .env (see `attendance telegram-setup`).")
 
     _seed_owner_if_absent(token)
+    _start_web_if_configured()
 
     print("Listening ... (Ctrl+C to stop)", flush=True)
     try:
@@ -813,6 +860,7 @@ def main() -> None:
         "run": run,                      # local: solve CAPTCHA at the machine
         "remote": remote,                # phone: bot relays the CAPTCHA to you (one-shot)
         "listen": listen,                # always-on: message /check to trigger
+        "web": web_only,                 # website only (local testing)
         "test-fill": test_fill,          # reuse saved session, form fill only
         "send": send_only,               # resend text from last PDF
         "report": report_only,           # full terminal report

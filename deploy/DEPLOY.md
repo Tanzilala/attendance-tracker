@@ -126,8 +126,10 @@ their own attendance. Each check uses that person's own credentials.
 - **One check at a time:** the bot runs checks serially; a `/check` sent while
   another is running is ignored until the first finishes.
 - **Credentials live on the VPS** in `.env` (chmod 600). Treat the box
-  accordingly. The Telegram bot only obeys your configured `TELEGRAM_CHAT_ID`, so
-  no one else can trigger it even if they find the bot.
+  accordingly. Anyone who finds the bot can message it, but only people who pass
+  the invite code can register, and each `/check` only ever uses that person's
+  own stored login.
+- **Website:** there is also an optional web front end — see `WEB.md`.
 - **Resource use:** idle, it just long-polls Telegram (negligible). During a
   check it launches one Chromium under xvfb for ~30-60s, then closes it.
 - **Time zone:** the 6 PM - 7 AM check uses the VPS clock. Confirm the VPS is on

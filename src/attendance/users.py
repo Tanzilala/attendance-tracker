@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from cryptography.fernet import Fernet
 
 STORE_PATH = Path("users.json")
 KEY_PATH = Path(".secret_key")
+_STORE_LOCK = threading.Lock()
 
 # Portal dropdown text is identical for every SVKM student, so we can build the
 # exact option strings from friendly inputs rather than make friends type them.
@@ -100,10 +102,23 @@ def get_user(chat_id: str) -> User | None:
     return User(**row) if row else None
 
 
+def find_by_username(sap_username: str) -> User | None:
+    """The record for a SAP roll number, whichever front end created it — lets a
+    friend who registered on Telegram log in on the website with the same login."""
+    wanted = sap_username.strip().lower()
+    for row in _load_raw().values():
+        if str(row.get("sap_username", "")).strip().lower() == wanted:
+            return User(**row)
+    return None
+
+
 def put_user(user: User) -> None:
-    data = _load_raw()
-    data[str(user.chat_id)] = asdict(user)
-    _save_raw(data)
+    # Telegram loop and web threads both write; serialise the read-modify-write
+    # so one never overwrites the other's registration.
+    with _STORE_LOCK:
+        data = _load_raw()
+        data[str(user.chat_id)] = asdict(user)
+        _save_raw(data)
 
 
 def all_chat_ids() -> list[str]:
