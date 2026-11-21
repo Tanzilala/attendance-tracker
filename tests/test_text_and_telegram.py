@@ -24,30 +24,15 @@ class TestParseMessage:
 
 
 class TestRegistrationValidation:
-    def test_semester_number_becomes_label(self):
-        assert _validate_step("semester", "5") == "Semester V"
+    def test_username_and_password_pass_through(self):
+        assert _validate_step("username", "45612240031") == "45612240031"
+        assert _validate_step("password", "pw") == "pw"
 
-    def test_bad_semester_raises_user_message(self):
-        with pytest.raises(ValueError, match="1-8"):
-            _validate_step("semester", "banana")
-
-    def test_year_becomes_academic_year_label(self):
-        assert _validate_step("year", "2026") == "Acad .Year 2026-2027"
-
-    def test_bad_year_raises(self):
+    def test_empty_username_or_password_rejected(self):
         with pytest.raises(ValueError):
-            _validate_step("year", "26")
-
-    def test_valid_date_passes_through(self):
-        assert _validate_step("start_date", "12.06.2026") == "12.06.2026"
-
-    def test_bad_date_raises(self):
-        with pytest.raises(ValueError, match="DD.MM.YYYY"):
-            _validate_step("start_date", "2026-06-12")
-
-    def test_classes_skip_defaults_to_six(self):
-        assert _validate_step("classes", "skip") == 6
-        assert _validate_step("classes", "8") == 8
+            _validate_step("username", "")
+        with pytest.raises(ValueError):
+            _validate_step("password", "")
 
 
 class TestViewingWindow:

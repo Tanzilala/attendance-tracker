@@ -27,15 +27,10 @@ def _feed(messages, reg=None):
 
 class TestRegistrationWithInvite:
     def test_full_flow_registers_the_user(self, bot):
-        _feed(["/register", "friends123", "45612240031", "mypw",
-               "5", "2026", "12.06.2026", "6"])
+        _feed(["/register", "friends123", "45612240031", "mypw"])
         u = users.get_user("42")
         assert u is not None
         assert u.sap_username == "45612240031"
-        assert u.semester == "Semester V"
-        assert u.academic_year == "Acad .Year 2026-2027"
-        assert u.start_date == "12.06.2026"
-        assert u.classes_per_day == 6
         assert u.password() == "mypw"          # decrypts back
         assert "✅" in bot[-1][1]               # confirmation was sent
 
@@ -45,11 +40,10 @@ class TestRegistrationWithInvite:
         assert "42" in reg                        # still mid-registration
         assert "invite code isn't right" in bot[-1][1]
 
-    def test_bad_semester_stays_on_step(self, bot):
-        _feed(["/register", "friends123", "45612240031", "mypw", "banana"])
-        # Still awaiting a valid semester; nothing saved yet.
-        assert users.get_user("42") is None
-        assert "1-8" in bot[-1][1]
+    def test_registration_asks_only_login_questions(self, bot):
+        _feed(["/register", "friends123", "45612240031"])
+        assert "password" in bot[-1][1].lower()
+        assert not any("semester" in t.lower() for _, t in bot)
 
 
 class TestCheckBeforeRegister:

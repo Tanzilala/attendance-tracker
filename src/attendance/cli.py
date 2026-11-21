@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -97,9 +95,7 @@ def _deliver(pdf_path: Path, ctx: CheckCtx, *, when: str = "") -> None:
         subjects = parse_pdf(pdf_path)
     except ParseError as exc:
         print(f"\n  Could not read the attendance PDF: {exc}")
-        if ctx.sink:
-            ctx.sink("error", f"Got the report but couldn't read it: {exc}")
-        elif ctx.send and ctx.token and ctx.chat_id:
+        if ctx.send and ctx.token and ctx.chat_id:
             try:
                 send_message(ctx.token, ctx.chat_id,
                              f"⚠️ Got the report but couldn't read it: {exc}")
@@ -113,9 +109,6 @@ def _deliver(pdf_path: Path, ctx: CheckCtx, *, when: str = "") -> None:
     for line in text.splitlines():
         print(f"    {line}")
 
-    if ctx.sink:  # web front end: hand the text to the job instead of Telegram
-        ctx.sink("result", text)
-        return
     if not (ctx.send and ctx.token and ctx.chat_id):
         return
     try:
@@ -150,47 +143,29 @@ def _credentials() -> tuple[str, str]:
 
 @dataclass
 class CheckCtx:
-    """Everything one attendance check needs — whose login, which filters, and
-    which Telegram chat to relay the CAPTCHA to and send the result to.
-
-    This is what makes the tool multi-user: each friend's /check builds a ctx
-    from their stored config, so the same pipeline serves everyone.
-    """
+    """One check's login and Telegram chat (where the CAPTCHA goes and the result
+    is sent). Semester and start date are the same for everyone, so they are the
+    module constants, not per-user."""
     token: str
     chat_id: str
     username: str
     password: str
-    academic_year: str
-    semester: str
-    start_date: str
-    classes_per_day: int
     send: bool = True
-    # When set (web front end), results/errors go here as sink(kind, text) with
-    # kind "result" | "error", instead of to Telegram.
-    sink: Callable[[str, str], None] | None = None
 
 
 def _owner_ctx(*, send: bool) -> CheckCtx:
-    """Context for the owner's own commands (run / remote / test-fill), built
-    from .env credentials and the current default filters."""
+    """Context for the owner's own commands, from .env credentials."""
     username, password = _credentials()
     creds = _telegram_creds()
     token, chat_id = creds if creds else ("", "")
-    return CheckCtx(
-        token=token, chat_id=chat_id, username=username, password=password,
-        academic_year=FILTER_ACADEMIC_YEAR, semester=FILTER_SEMESTER,
-        start_date=SEMESTER_START, classes_per_day=_classes_per_day(), send=send,
-    )
+    return CheckCtx(token=token, chat_id=chat_id, username=username,
+                    password=password, send=send)
 
 
 def _user_ctx(token: str, user: users.User) -> CheckCtx:
-    """Context for a registered friend, from their stored config."""
-    return CheckCtx(
-        token=token, chat_id=str(user.chat_id), username=user.sap_username,
-        password=user.password(), academic_year=user.academic_year,
-        semester=user.semester, start_date=user.start_date,
-        classes_per_day=user.classes_per_day, send=True,
-    )
+    """Context for a registered friend."""
+    return CheckCtx(token=token, chat_id=str(user.chat_id),
+                    username=user.sap_username, password=user.password())
 
 
 def discover() -> None:
@@ -277,12 +252,12 @@ def _pipeline_after_login(page, downloads, ctx: CheckCtx, capture) -> None:
     frame = wait_for_form(page)  # the exact frame the form was found in
     lap("form ready; filling filters")
 
-    select_filter(frame, 0, ctx.academic_year)
-    select_filter(frame, 1, ctx.semester)
+    select_filter(frame, 0, FILTER_ACADEMIC_YEAR)
+    select_filter(frame, 1, FILTER_SEMESTER)
     select_filter(frame, 2, FILTER_REPORT_TYPE)
     lap("dropdowns set; filling dates")
 
-    fill_dates(frame, ctx.start_date, end_date)
+    fill_dates(frame, SEMESTER_START, end_date)
     lap("submitting")
 
     # Intercept the PDF at the network layer before Chromium's viewer eats it.
@@ -316,22 +291,8 @@ def _pipeline_after_login(page, downloads, ctx: CheckCtx, capture) -> None:
         print("  Submitted, but no PDF was captured.", flush=True)
 
 
-# One browser session at a time across every front end (Telegram loop and web
-# workers share this process): serial checks keep memory bounded on a small VPS.
-_CHECK_LOCK = threading.Lock()
-
-
-def _run_check(ctx: CheckCtx, login_fn, *, on_start=None, **kwargs) -> None:
-    """Serialise checks, then drive one. on_start() fires once the lock is won
-    (the web UI uses it to flip a job from 'queued' to 'starting')."""
-    with _CHECK_LOCK:
-        if on_start:
-            on_start()
-        _run_check_locked(ctx, login_fn, **kwargs)
-
-
-def _run_check_locked(ctx: CheckCtx, login_fn, *, headless: bool, pause_at_end: bool = False,
-                      on_error=None, save_session: bool = False) -> None:
+def _run_check(ctx: CheckCtx, login_fn, *, headless: bool, pause_at_end: bool = False,
+               on_error=None, save_session: bool = False) -> None:
     """Drive one browser session: login (via login_fn) then the shared pipeline.
 
     login_fn(page) closes over whatever it needs (ctx credentials, or the
@@ -502,7 +463,7 @@ def _parse_message(update: dict) -> tuple[str | None, str]:
 _HELP = (
     "📋 Attendance bot\n"
     "/check - check your attendance (works 6 PM - 7 AM)\n"
-    "/register - set up or update your details\n"
+    "/register - set up, or update your SAP login\n"
     "/help - this message"
 )
 
@@ -535,49 +496,15 @@ def _validate_step(step: str, text: str) -> object:
         if not text:
             raise ValueError("Please send your SAP password:")
         return text
-    if step == "semester":
-        try:
-            n = int(text)
-            return users.semester_label(n)  # validates 1-8
-        except ValueError:
-            raise ValueError("Reply with your semester as a number 1-8 (e.g. 5):")
-    if step == "year":
-        try:
-            y = int(text)
-            if not (2000 <= y <= 2100):
-                raise ValueError
-            return users.academic_year_label(y)
-        except ValueError:
-            raise ValueError("Reply the academic year's START year, e.g. 2026:")
-    if step == "start_date":
-        try:
-            datetime.strptime(text, DATE_FMT)  # DD.MM.YYYY
-            return text
-        except ValueError:
-            raise ValueError("Reply the semester start date as DD.MM.YYYY (e.g. 12.06.2026):")
-    if step == "classes":
-        if text.lower() in ("skip", "-", ""):
-            return 6
-        try:
-            return max(1, int(text))
-        except ValueError:
-            raise ValueError("Reply a number (classes per day), or 'skip' for 6:")
     raise ValueError("Unknown step")
 
 
-_NEXT_STEP = {
-    "invite": "username", "username": "password", "password": "semester",
-    "semester": "year", "year": "start_date", "start_date": "classes",
-}
+_NEXT_STEP = {"invite": "username", "username": "password"}
 _STEP_PROMPT = {
     # "username" is here too: with an invite code, invite -> username is a
     # mid-flow transition, so this prompt is needed (not just the opening one).
     "username": "Your SAP username (roll number):",
     "password": "Your SAP password (stored encrypted; needed to log in for you):",
-    "semester": "Which semester are you in? Reply a number 1-8:",
-    "year": "Academic year START year (e.g. 2026 for 2026-2027):",
-    "start_date": "Semester start date as DD.MM.YYYY (e.g. 12.06.2026):",
-    "classes": "Roughly how many classes per day? Reply a number, or 'skip' for 6:",
 }
 
 
@@ -593,7 +520,7 @@ def _advance_registration(token: str, chat_id: str, text: str, reg: dict) -> Non
 
     state["data"][step] = value
     nxt = _NEXT_STEP.get(step)
-    if nxt is None:  # was the last step ("classes")
+    if nxt is None:  # was the last step ("password")
         _finish_registration(token, chat_id, reg)
         return
     state["step"] = nxt
@@ -605,19 +532,13 @@ def _finish_registration(token: str, chat_id: str, reg: dict) -> None:
     user = users.User(
         chat_id=chat_id,
         sap_username=data["username"],
-        academic_year=data["year"],
-        semester=data["semester"],
-        start_date=data["start_date"],
-        classes_per_day=int(data.get("classes", 6)),
         sap_password_enc=users.encrypt_password(data["password"]),
     )
     users.put_user(user)
     send_message(
         token, chat_id,
         "✅ You're registered!\n"
-        f"Roll no: {user.sap_username}\n"
-        f"{user.semester}, {user.academic_year}\n"
-        f"From: {user.start_date}\n\n"
+        f"Roll no: {user.sap_username}\n\n"
         "Send /check any evening (6 PM - 7 AM) to get your attendance.",
     )
 
@@ -648,28 +569,12 @@ def _handle_message(token: str, chat_id: str, text: str, reg: dict) -> bool:
 
 def _seed_owner_if_absent(token: str) -> None:
     """Register the owner from .env once, so the owner is just another user and
-    the pre-multiuser setup keeps working with no manual re-registration.
-
-    The owner's semester/year/start-date are defined by the constants in code, so
-    on every start an existing owner record is brought in line with them — a new
-    semester then needs only a code update + restart, not a re-registration.
-    """
+    needs no manual /register."""
     creds = _telegram_creds()
     if not creds:
         return
     _, owner_chat = creds
-    if not owner_chat:
-        return
-    existing = users.get_user(owner_chat)
-    if existing:
-        wanted = replace(
-            existing, academic_year=FILTER_ACADEMIC_YEAR,
-            semester=FILTER_SEMESTER, start_date=SEMESTER_START,
-        )
-        if wanted != existing:
-            users.put_user(wanted)
-            print(f"  owner updated to {FILTER_SEMESTER}, from {SEMESTER_START}",
-                  flush=True)
+    if not owner_chat or users.get_user(owner_chat):
         return
     username = (os.environ.get("SAP_USERNAME") or "").strip()
     password = (os.environ.get("SAP_PASSWORD") or "").strip()
@@ -678,8 +583,6 @@ def _seed_owner_if_absent(token: str) -> None:
     try:
         users.put_user(users.User(
             chat_id=owner_chat, sap_username=username,
-            academic_year=FILTER_ACADEMIC_YEAR, semester=FILTER_SEMESTER,
-            start_date=SEMESTER_START, classes_per_day=_classes_per_day(),
             sap_password_enc=users.encrypt_password(password),
         ))
         print(f"  seeded owner {owner_chat} from .env", flush=True)
@@ -687,33 +590,11 @@ def _seed_owner_if_absent(token: str) -> None:
         print(f"  owner seed failed ({exc}); continuing", flush=True)
 
 
-def _start_web_if_configured() -> None:
-    """Serve the website alongside the bot when WEB_PORT is set in .env.
-
-    Off by default: the site takes SAP passwords, so it must only ever be exposed
-    behind HTTPS (see deploy/WEB.md). A failure here must not take the bot down.
-    """
-    if not (os.environ.get("WEB_PORT") or "").strip():
-        return
-    try:
-        from attendance import web
-        web.serve_in_background()
-    except Exception as exc:
-        print(f"  web front end failed to start ({exc}); bot continues", flush=True)
-
-
-def web_only() -> None:
-    """Run just the website in the foreground (local testing; no Telegram needed)."""
-    load_dotenv()
-    from attendance import web
-    web.serve_forever()
-
-
 def listen() -> None:
     """Run continuously; anyone registered can /check. New friends /register.
 
     Always-on mode for the VPS. Multi-user: each message is routed by the sender's
-    chat, and each check uses that person's stored credentials and filters.
+    chat, and each check uses that person's stored credentials.
     """
     load_dotenv()
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -721,7 +602,6 @@ def listen() -> None:
         sys.exit("Set TELEGRAM_BOT_TOKEN in .env (see `attendance telegram-setup`).")
 
     _seed_owner_if_absent(token)
-    _start_web_if_configured()
 
     print("Listening ... (Ctrl+C to stop)", flush=True)
     try:
@@ -860,7 +740,6 @@ def main() -> None:
         "run": run,                      # local: solve CAPTCHA at the machine
         "remote": remote,                # phone: bot relays the CAPTCHA to you (one-shot)
         "listen": listen,                # always-on: message /check to trigger
-        "web": web_only,                 # website only (local testing)
         "test-fill": test_fill,          # reuse saved session, form fill only
         "send": send_only,               # resend text from last PDF
         "report": report_only,           # full terminal report

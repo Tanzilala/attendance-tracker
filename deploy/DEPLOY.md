@@ -105,9 +105,12 @@ follows.
 
 ## Letting friends use it (multi-user)
 
-The bot is multi-user: anyone who messages it can `/register` (SAP login +
-semester/year/start-date, password stored **encrypted**) and then `/check` to get
-their own attendance. Each check uses that person's own credentials.
+The bot is multi-user: anyone who messages it can `/register` (invite code, SAP
+roll number and password — stored **encrypted**) and then `/check` to get their
+own attendance. Each check uses that person's own credentials. The semester,
+academic year and start date are the same for everyone and live in the code
+(`FILTER_SEMESTER` in `browser.py`, `SEMESTER_START` in `cli.py`); each new
+semester you change those two lines, `git pull` and restart — friends do nothing.
 
 - **Set an invite code.** In `.env`, set `ATTENDANCE_INVITE_CODE` to something and
   share it only with friends — otherwise any stranger who finds the bot can
@@ -129,7 +132,6 @@ their own attendance. Each check uses that person's own credentials.
   accordingly. Anyone who finds the bot can message it, but only people who pass
   the invite code can register, and each `/check` only ever uses that person's
   own stored login.
-- **Website:** there is also an optional web front end — see `WEB.md`.
 - **Resource use:** idle, it just long-polls Telegram (negligible). During a
   check it launches one Chromium under xvfb for ~30-60s, then closes it.
 - **Time zone:** the 6 PM - 7 AM check uses the VPS clock. Confirm the VPS is on
